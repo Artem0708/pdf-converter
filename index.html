@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Личный PDF Конвертер (v3 - с фиксом)</title>
+    <!-- Подключаем библиотеку jsPDF с CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <!-- НОВАЯ БИБЛИОТЕКА для чтения EXIF-данных (ориентации фото) -->
+    <script src="https://cdn.jsdelivr.net/npm/exifr/dist/exifr.iife.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; 
+               background: #f4f4f9; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        h1 { color: #333; text-align: center; }
+        #fileInput { border: 2px dashed #007bff; padding: 20px; border-radius: 8px; background: #fff; cursor: pointer; display: block; text-align: center; margin-bottom: 20px;}
+        #convertButton { width: 100%; padding: 12px 20px; background-color: #007bff; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; transition: background-color 0.3s; }
+        #convertButton:hover { background-color: #0056b3; }
+        #convertButton:disabled { background-color: #aaa; }
+        #status { text-align: center; margin-top: 15px; font-style: italic; color: #555; height: 1.2em;}
+    </style>
+</head>
+<body>
+
+    <h1>Мой Конвертер Фото в PDF</h1>
+    
+    <input type="file" id="fileInput" multiple accept="image/png, image/jpeg, image/bmp, image/webp">
+    
+    <button id="convertButton">Создать PDF</button>
+
+    <div id="status">Выберите файлы и нажмите кнопку</div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const convertButton = document.getElementById('convertButton');
+        const statusEl = document.getElementById('status');
+        
+        const { jsPDF } = window.jspdf;
+
+        convertButton.addEventListener('click', async () => {
+            const files = fileInput.files;
+            
+            if (files.length === 0) {
+                statusEl.textContent = 'Пожалуйста, сначала выберите файлы!';
+                return;
+            }
+
+            statusEl.textContent = 'Обработка...';
+            convertButton.disabled = true;
+
+            try {
+                // Создаем PDF-документ
+                const doc = new jsPDF();
+                // Удаляем первую пустую страницу
+                doc.deletePage(1);
+
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    statusEl.textContent = `Обработка файла ${i + 1} из ${files.length}...`;
+
+                    // --- ИСПРАВЛЕНИЕ НАЧИНАЕТСЯ ЗДЕСЬ ---
+
+                    // 1. Читаем файл ДВУМЯ способами
+                    const imgDataPromise = readFileAsDataURL(file); // для рисования
+                    const arrayBufferPromise = readFileAsArrayBuffer(file); // для EXIF
+                    
+                    const [imgData, arrayBuffer] = await Promise.all([imgDataPromise, arrayBufferPromise]);
+
+                    // 2. Получаем "сырые" размеры
+                    const rawImgProps = await getImageProperties(imgData);
+                    
+                    // 3. Получаем EXIF-данные
+                    let orientation = 1;
+                    try {
+                        // exifr.parse() быстро читает ArrayBuffer
+                        const exif = await exifr.parse(arrayBuffer);
+                        if (exif && exif.orientation) {
+                            orientation = exif.orientation;
+                        }
+                    } catch (e) {
+                        // Это не JPEG или нет EXIF, что нормально
+                        console.log(`Файл ${file.name}: не-JPEG или нет EXIF, используется ориентация по умолчанию.`);
+                    }
+                    
+                    // 4. Создаем новое "правильное" изображение на Canvas
+                    const { correctedDataURL, visualWidth, visualHeight } = await getCorrectedImage(
+                        imgData, 
+                        rawImgProps.width, 
+                        rawImgProps.height, 
+                        orientation
+                    );
+                    
+                    // 5. Определяем ориентацию страницы
+                    const pageOrientation = (visualWidth > visualHeight) ? 'l' : 'p';
+
+                    // 6. Добавляем новую страницу
+                    doc.addPage('a4', pageOrientation);
+
+                    // 7. Получаем размеры этой новой страницы
+                    const pageWidth = doc.internal.pageSize.getWidth();
+                    const pageHeight = doc.internal.pageSize.getHeight();
+                    
+                    // 8. Логика масштабирования (с "визуальными" размерами)
+                    const pageRatio = pageWidth / pageHeight;
+                    const imgRatio = visualWidth / visualHeight;
+
+                    let imgWidth, imgHeight;
+
+                    if (imgRatio > pageRatio) {
+                        imgWidth = pageWidth;
+                        imgHeight = imgWidth / imgRatio;
+                    } else {
+                        imgHeight = pageHeight;
+                        imgWidth = imgHeight * imgRatio;
+                    }
+
+                    // 9. Центрируем
+                    const x = (pageWidth - imgWidth) / 2;
+                    const y = (pageHeight - imgHeight) / 2;
+                    
+                    // 10. Добавляем ИСПРАВЛЕННОЕ изображение
+                    // (Принудительно JPEG, т.к. canvas.toDataURL возвращает jpeg)
+                    doc.addImage(correctedDataURL, 'JPEG', x, y, imgWidth, imgHeight); 
+                    
+                    // --- ИСПРАВЛЕНИЕ ЗАКАНЧИВАЕТСЯ ЗДЕСЬ ---
+                }
+                
+                statusEl.textContent = 'Готово! Скачивание...';
+                doc.save('my-converted-file.pdf');
+                statusEl.textContent = 'Выберите файлы и нажмите кнопку';
+
+            } catch (error) {
+                statusEl.textContent = `Ошибка: ${error.message}`;
+                console.error(error);
+            } finally {
+                convertButton.disabled = false;
+            }
+        });
+
+        // Вспомогательная функция для асинхронного чтения файла (DataURL)
+        function readFileAsDataURL(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = (e) => reject(e);
+                reader.readAsDataURL(file);
+            });
+        }
+        
+        // НОВАЯ: Вспомогательная функция для асинхронного чтения файла (ArrayBuffer)
+        function readFileAsArrayBuffer(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = (e) => reject(e);
+                reader.readAsArrayBuffer(file);
+            });
+        }
+        
+        // Вспомогательная функция для получения размеров картинки
+        function getImageProperties(imgData) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve({
+                    width: img.width,
+                    height: img.height,
+                    type: imgData.split(';')[0].split('/')[1] // (jpeg, png, etc.)
+                });
+                img.onerror = (e) => reject(e);
+                img.src = imgData;
+            });
+        }
+
+        // НОВАЯ: Функция для поворота изображения на Canvas
+        function getCorrectedImage(imgData, rawWidth, rawHeight, orientation) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+
+                    let visualWidth = rawWidth;
+                    let visualHeight = rawHeight;
+
+                    // Если ориентация 5, 6, 7, 8 - "визуальные" размеры меняются
+                    if (orientation > 4) {
+                        visualWidth = rawHeight;
+                        visualHeight = rawWidth;
+                    }
+
+                    canvas.width = visualWidth;
+                    canvas.height = visualHeight;
+
+                    // Применяем трансформации
+                    switch (orientation) {
+                        case 2:
+                            // horizontal flip
+                            ctx.translate(visualWidth, 0);
+                            ctx.scale(-1, 1);
+                            break;
+                        case 3:
+                            // 180°
+                            ctx.translate(visualWidth, visualHeight);
+                            ctx.rotate(Math.PI);
+                            break;
+                        case 4:
+                            // vertical flip
+                            ctx.translate(0, visualHeight);
+                            ctx.scale(1, -1);
+                            break;
+                        case 5:
+                            // horizontal flip + 270°
+                            ctx.rotate(0.5 * Math.PI);
+                            ctx.scale(1, -1);
+                            break;
+                        case 6:
+                            // 90° (это наш случай со стр. 2)
+                            ctx.rotate(0.5 * Math.PI);
+                            ctx.translate(0, -visualWidth);
+                            break;
+                        case 7:
+                            // horizontal flip + 90°
+                            ctx.rotate(0.5 * Math.PI);
+                            ctx.translate(visualHeight, -visualWidth);
+                            ctx.scale(-1, 1);
+                            break;
+                        case 8:
+                            // 270°
+                            ctx.rotate(-0.5 * Math.PI);
+                            ctx.translate(-visualHeight, 0);
+                            break;
+                        case 1:
+                        default:
+                            // no transform
+                            break;
+                    }
+
+                    // Рисуем исходное (raw) изображение на повернутый canvas
+                    ctx.drawImage(img, 0, 0, rawWidth, rawHeight);
+                    
+                    // Получаем data URL из canvas (всегда JPEG для PDF)
+                    const correctedDataURL = canvas.toDataURL('image/jpeg', 0.9);
+                    
+                    resolve({ correctedDataURL, visualWidth, visualHeight });
+                };
+                img.onerror = (e) => reject(e);
+                img.src = imgData;
+            });
+        }
+
+    </script>
+</body>
+</html>
+
