@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Личный PDF Редактор (v6.1 - Fix Extract)</title>
+    <title>Личный PDF Редактор (v6.2 - Added PDF to JPG)</title>
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/exifr/dist/exifr.iife.js"></script>
@@ -60,7 +60,7 @@
         <button class="tab-button active" data-tab="imageConverter">Фото в PDF</button>
         <button class="tab-button" data-tab="pdfMerger">Объединить PDF</button>
         <button class="tab-button" data-tab="pdfSplitter">Разбить / Собрать PDF</button>
-        <button class="tab-button" data-tab="pdfExtractor">Извлечь Картинки (в .zip)</button>
+        <button class="tab-button" data-tab="pdfToJpeg">PDF в JPG</button> <button class="tab-button" data-tab="pdfExtractor">Извлечь Картинки</button>
     </div>
 
     <div id="imageConverter" class="tool-panel active">
@@ -94,6 +94,12 @@
             </div>
             <button id="createButtonSplit" class="action-button" style="margin-top: 20px;">2. Собрать и скачать PDF</button>
         </div>
+    </div>
+
+    <div id="pdfToJpeg" class="tool-panel">
+        <input type="file" id="fileInputToJpeg" class="file-input" accept="application/pdf">
+        <button id="convertPdfToJpegBtn" class="action-button">Конвертировать страницы в JPG (ZIP)</button>
+        <div id="statusToJpeg" class="status">Выберите PDF-файл для конвертации</div>
     </div>
     
     <div id="pdfExtractor" class="tool-panel">
@@ -145,9 +151,8 @@
         }
 
         // ==========================================================
-        // --- 1. ЛОГИКА КОНВЕРТЕРА ФОТО (Старый код) ---
+        // --- 1. ЛОГИКА КОНВЕРТЕРА ФОТО ---
         // ==========================================================
-        
         (function setupImageConverter() {
             const fileInputImages = document.getElementById('fileInputImages');
             const convertButtonImages = document.getElementById('convertButtonImages');
@@ -236,9 +241,8 @@
 
 
         // ==========================================================
-        // --- 2. ЛОГИКА ОБЪЕДИНЕНИЯ PDF (Старый код) ---
+        // --- 2. ЛОГИКА ОБЪЕДИНЕНИЯ PDF ---
         // ==========================================================
-
         (function setupPdfMerger() {
             const fileInputMerge = document.getElementById('fileInputMerge');
             const convertButtonMerge = document.getElementById('convertButtonMerge');
@@ -269,9 +273,8 @@
 
 
         // ==========================================================
-        // --- 3. ЛОГИКА РАЗДЕЛИТЕЛЯ PDF (Старый код) ---
+        // --- 3. ЛОГИКА РАЗДЕЛИТЕЛЯ PDF ---
         // ==========================================================
-
         (function setupPdfSplitter() {
             const fileInputSplit = document.getElementById('fileInputSplit');
             const loadButtonSplit = document.getElementById('loadButtonSplit');
@@ -391,11 +394,74 @@
                 } finally { createButtonSplit.disabled = false; }
             });
         })();
+
+        // ==========================================================
+        // --- 4. NEW: PDF TO JPEG LOGIC ---
+        // ==========================================================
+        (function setupPdfToJpeg() {
+            const fileInputToJpeg = document.getElementById('fileInputToJpeg');
+            const convertPdfToJpegBtn = document.getElementById('convertPdfToJpegBtn');
+            const statusToJpeg = document.getElementById('statusToJpeg');
+
+            convertPdfToJpegBtn.addEventListener('click', async () => {
+                const file = fileInputToJpeg.files[0];
+                if (!file) {
+                    statusToJpeg.textContent = 'Пожалуйста, выберите PDF-файл.';
+                    return;
+                }
+
+                statusToJpeg.textContent = 'Инициализация...';
+                convertPdfToJpegBtn.disabled = true;
+
+                try {
+                    const arrayBuffer = await readFileAsArrayBuffer(file);
+                    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                    const pdfDoc = await loadingTask.promise;
+                    
+                    const zip = new JSZip();
+                    const totalPages = pdfDoc.numPages;
+
+                    for (let i = 1; i <= totalPages; i++) {
+                        statusToJpeg.textContent = `Конвертация страницы ${i} из ${totalPages}...`;
+                        
+                        const page = await pdfDoc.getPage(i);
+                        // Scale 2.0 provides better quality than 1.0 (default)
+                        const viewport = page.getViewport({ scale: 2.0 }); 
+                        
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = viewport.width;
+                        canvas.height = viewport.height;
+
+                        const renderContext = {
+                            canvasContext: ctx,
+                            viewport: viewport
+                        };
+
+                        await page.render(renderContext).promise;
+
+                        // Convert Canvas to Blob (JPEG)
+                        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+                        zip.file(`page-${i}.jpg`, blob);
+                    }
+
+                    statusToJpeg.textContent = 'Создание ZIP-архива...';
+                    const content = await zip.generateAsync({ type: "blob" });
+                    downloadBlob(content, "pdf-pages-to-jpg.zip");
+                    statusToJpeg.textContent = 'Готово! Архив скачан.';
+
+                } catch (error) {
+                    statusToJpeg.textContent = `Ошибка: ${error.message}`;
+                    console.error(error);
+                } finally {
+                    convertPdfToJpegBtn.disabled = false;
+                }
+            });
+        })();
         
         // ==========================================================
-        // --- 4. ЛОГИКА ИЗВЛЕЧЕНИЯ КАРТИНОК (С ИСПРАВЛЕНИЕМ) ---
+        // --- 5. ЛОГИКА ИЗВЛЕЧЕНИЯ КАРТИНОК ---
         // ==========================================================
-        
         (function setupImageExtractor() {
             const fileInputExtract = document.getElementById('fileInputExtract');
             const extractButton = document.getElementById('extractButton');
@@ -473,7 +539,6 @@
                 }
             });
 
-            // *** НАЧАЛО ИСПРАВЛЕНИЯ ***
             // Вспомогательная функция для конвертации данных в PNG
             async function convertImgDataToPngBlob(imgData) {
                 const canvas = document.createElement('canvas');
@@ -481,11 +546,7 @@
                 canvas.height = imgData.height;
                 const ctx = canvas.getContext('2d');
                 
-                // Данные могут быть JPEG (0), RGBA (1) или RGB (2)
-                // ИСПРАВЛЕНО: pdfjsLib.ImageKind не всегда доступен, используем "магические числа"
-                
                 if (imgData.kind === 0) { // 0 === JPEG
-                    // Это JPEG, самый простой случай
                     try {
                         const blob = new Blob([imgData.data], { type: 'image/jpeg' });
                         const url = URL.createObjectURL(blob);
@@ -499,11 +560,10 @@
                         URL.revokeObjectURL(url);
                     } catch (e) {
                         console.error("Ошибка обработки JPEG:", e, imgData);
-                        return null; // Возвращаем null при ошибке
+                        return null; 
                     }
                     
                 } else if (imgData.kind === 1) { // 1 === RGBA_32BPP
-                    // Это RGBA (4 байта на пиксель)
                     try {
                         const imageData = ctx.createImageData(imgData.width, imgData.height);
                         imageData.data.set(imgData.data);
@@ -514,7 +574,6 @@
                     }
                     
                 } else if (imgData.kind === 2) { // 2 === RGB_24BPP
-                    // Это RGB (3 байта на пиксель), нужно добавить Alpha
                     try {
                         const imageData = ctx.createImageData(imgData.width, imgData.height);
                         const rgbData = imgData.data;
@@ -524,7 +583,7 @@
                             rgbaData[j++] = rgbData[i];     // R
                             rgbaData[j++] = rgbData[i + 1]; // G
                             rgbaData[j++] = rgbData[i + 2]; // B
-                            rgbaData[j++] = 255;            // A (полная непрозрачность)
+                            rgbaData[j++] = 255;            // A
                         }
                         ctx.putImageData(imageData, 0, 0);
                     } catch (e) {
@@ -532,15 +591,12 @@
                         return null;
                     }
                 } else {
-                    // Другие/неизвестные форматы
                     console.warn("Неподдерживаемый формат изображения:", imgData.kind);
-                    return null; // Возвращаем null для неподдерживаемых форматов
+                    return null;
                 }
                 
-                // Конвертируем canvas в PNG blob
                 return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
             }
-            // *** КОНЕЦ ИСПРАВЛЕНИЯ ***
 
         })();
 
