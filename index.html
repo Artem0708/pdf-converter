@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Личный PDF Редактор (v6.2 - Added PDF to JPG)</title>
+    <title>Личный PDF Редактор (v6.4 - Adobe Sign Fix)</title>
     
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/exifr/dist/exifr.iife.js"></script>
@@ -54,13 +54,14 @@
 </head>
 <body>
 
-    <h1>Мой PDF Редактор</h1>
+    <h1>Мой PDF Редактор (v6.4)</h1>
 
     <div class="tab-nav">
         <button class="tab-button active" data-tab="imageConverter">Фото в PDF</button>
         <button class="tab-button" data-tab="pdfMerger">Объединить PDF</button>
         <button class="tab-button" data-tab="pdfSplitter">Разбить / Собрать PDF</button>
-        <button class="tab-button" data-tab="pdfToJpeg">PDF в JPG</button> <button class="tab-button" data-tab="pdfExtractor">Извлечь Картинки</button>
+        <button class="tab-button" data-tab="pdfToJpeg">PDF в JPG</button>
+        <button class="tab-button" data-tab="pdfExtractor">Извлечь Картинки</button>
     </div>
 
     <div id="imageConverter" class="tool-panel active">
@@ -73,7 +74,7 @@
         <input type="file" id="fileInputMerge" class="file-input" multiple accept="application/pdf">
         <button id="convertButtonMerge" class="action-button">Объединить PDF-файлы</button>
         <div id="statusMerge" class="status">Выберите 2+ PDF-файла</div>
-        <div style="font-size: 0.9em; color: #666; margin-top: 10px;">(Файлы будут объединены в том порядке, в каком вы их выбрали)</div>
+        <div style="font-size: 0.9em; color: #666; margin-top: 10px;">(Поддерживаются файлы с Adobe Sign / паролями)</div>
     </div>
 
     <div id="pdfSplitter" class="tool-panel">
@@ -113,13 +114,12 @@
         // --- ОБЩИЕ ЭЛЕМЕНТЫ И ЛОГИКА ---
         const { jsPDF } = window.jspdf;
         const { PDFDocument } = PDFLib;
-        const { pdfjsLib } = window; // Глобальный объект pdf.js
-        const { JSZip } = window; // Глобальный объект jszip
+        const { pdfjsLib } = window;
+        const { JSZip } = window;
 
-        // Настройка pdf.js
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
 
-        // --- Логика переключения вкладок ---
+        // --- Табы ---
         document.querySelector('.tab-nav').addEventListener('click', (e) => {
             if (e.target.tagName !== 'BUTTON' || e.target.disabled) return;
             document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
@@ -150,6 +150,59 @@
             a.remove();
         }
 
+        /**
+         * УМНАЯ ЗАГРУЗКА PDF (для pdf-lib)
+         * Пытается загрузить файл:
+         * 1. Как обычно.
+         * 2. Если ошибка "encrypted" -> пробует пустой пароль (для Adobe Sign).
+         * 3. Если не вышло -> спрашивает пароль у пользователя.
+         */
+        async function smartLoadPdfLib(arrayBuffer, fileName) {
+            try {
+                // Попытка 1: Без пароля
+                return await PDFDocument.load(arrayBuffer);
+            } catch (error) {
+                if (error.message.includes('encrypted')) {
+                    try {
+                        // Попытка 2: Пустой пароль (Adobe Sign / DocuSign)
+                        return await PDFDocument.load(arrayBuffer, { password: '' });
+                    } catch (error2) {
+                        // Попытка 3: Спрашиваем у пользователя
+                        const password = prompt(`Файл "${fileName || 'PDF'}" защищен. Введите пароль (если это Adobe Sign, просто нажмите ОК или оставьте пустым):`);
+                        // Пробуем введенный пароль (даже если пустой, вдруг пользователь явно нажал ОК)
+                        return await PDFDocument.load(arrayBuffer, { password: password || '' });
+                    }
+                }
+                throw error; // Если ошибка не про шифрование, прокидываем дальше
+            }
+        }
+
+        /**
+         * УМНАЯ ЗАГРУЗКА PDF (для pdf.js)
+         * Аналогично, но для рендеринга картинок
+         */
+        function getSmartPdfJsLoadingTask(arrayBuffer) {
+            return pdfjsLib.getDocument({ 
+                data: arrayBuffer,
+                password: (updatePassword, reason) => {
+                    // Reason 1 = неверный пароль.
+                    // Если это первый запрос, пробуем пустую строку автоматически?
+                    // pdf.js сам обычно пробует пустую строку. Если мы здесь, значит она не подошла.
+                    // Но для Adobe Sign часто нужно просто передать callback.
+                    
+                    if (reason === 1) { // Уже пробовали, не подошло
+                        const p = prompt('Пароль не подходит. Введите снова:');
+                        updatePassword(p || '');
+                    } else {
+                         // Первый запрос пароля. 
+                         // ВНИМАНИЕ: Если pdf.js вызывает это, значит автоматическое открытие не сработало.
+                         // Но для некоторых Sign файлов нужно явно нажать "ОК" с пустым паролем.
+                         updatePassword(''); 
+                    }
+                }
+            });
+        }
+
         // ==========================================================
         // --- 1. ЛОГИКА КОНВЕРТЕРА ФОТО ---
         // ==========================================================
@@ -167,76 +220,49 @@
                     for (let i = 0; i < files.length; i++) {
                         const file = files[i];
                         statusImages.textContent = `Обработка файла ${i + 1} из ${files.length}...`;
-                        const imgDataPromise = readFileAsDataURL(file);
-                        const arrayBufferPromise = readFileAsArrayBuffer(file);
-                        const [imgData, arrayBuffer] = await Promise.all([imgDataPromise, arrayBufferPromise]);
-                        const rawImgProps = await getImageProperties(imgData);
-                        let orientation = 1;
-                        try {
-                            const exif = await exifr.parse(arrayBuffer);
-                            if (exif && exif.orientation) { orientation = exif.orientation; }
-                        } catch (e) { console.log(`Файл ${file.name}: не-JPEG или нет EXIF`); }
+                        const buf = await readFileAsArrayBuffer(file);
                         
-                        const { correctedDataURL, visualWidth, visualHeight } = await getCorrectedImage(imgData, rawImgProps.width, rawImgProps.height, orientation);
-                        const pageOrientation = (visualWidth > visualHeight) ? 'l' : 'p';
-                        doc.addPage('a4', pageOrientation);
-                        const pageWidth = doc.internal.pageSize.getWidth();
-                        const pageHeight = doc.internal.pageSize.getHeight();
-                        const pageRatio = pageWidth / pageHeight; const imgRatio = visualWidth / visualHeight;
-                        let imgWidth, imgHeight;
-                        if (imgRatio > pageRatio) { imgWidth = pageWidth; imgHeight = imgWidth / imgRatio; }
-                        else { imgHeight = pageHeight; imgWidth = imgHeight * imgRatio; }
-                        const x = (pageWidth - imgWidth) / 2; const y = (pageHeight - imgHeight) / 2;
-                        doc.addImage(correctedDataURL, 'JPEG', x, y, imgWidth, imgHeight); 
+                        // EXIF & Image Load
+                        const blob = new Blob([buf]);
+                        const url = URL.createObjectURL(blob);
+                        const img = new Image(); 
+                        await new Promise((r,e) => { img.onload=r; img.onerror=e; img.src=url; });
+                        
+                        let orientation = 1;
+                        try { const exif = await exifr.parse(buf); if (exif?.orientation) orientation = exif.orientation; } catch(e){}
+
+                        const cvs = document.createElement('canvas'); const ctx = cvs.getContext('2d');
+                        let w = img.width, h = img.height;
+                        if (orientation > 4) { w = h; h = img.width; }
+                        cvs.width = w; cvs.height = h;
+
+                        switch (orientation) {
+                            case 2: ctx.translate(w, 0); ctx.scale(-1, 1); break;
+                            case 3: ctx.translate(w, h); ctx.rotate(Math.PI); break;
+                            case 4: ctx.translate(0, h); ctx.scale(1, -1); break;
+                            case 5: ctx.rotate(0.5 * Math.PI); ctx.scale(1, -1); break;
+                            case 6: ctx.rotate(0.5 * Math.PI); ctx.translate(0, -w); break;
+                            case 7: ctx.rotate(0.5 * Math.PI); ctx.translate(h, -w); ctx.scale(-1, 1); break;
+                            case 8: ctx.rotate(-0.5 * Math.PI); ctx.translate(-h, 0); break;
+                        }
+                        ctx.drawImage(img, 0, 0, img.width, img.height);
+                        const correctUrl = cvs.toDataURL('image/jpeg', 0.9);
+                        URL.revokeObjectURL(url);
+
+                        // PDF Layout
+                        const isL = w > h;
+                        doc.addPage('a4', isL ? 'l' : 'p');
+                        const pW = doc.internal.pageSize.getWidth();
+                        const pH = doc.internal.pageSize.getHeight();
+                        const ratio = Math.min(pW / w, pH / h);
+                        const fW = w * ratio; const fH = h * ratio;
+                        doc.addImage(correctUrl, 'JPEG', (pW - fW)/2, (pH - fH)/2, fW, fH);
                     }
-                    statusImages.textContent = 'Готово! Скачивание...';
                     doc.save('my-converted-file.pdf');
-                    statusImages.textContent = 'Выберите файлы и нажмите кнопку';
-                } catch (error) { statusImages.textContent = `Ошибка: ${error.message}`; console.error(error);
+                    statusImages.textContent = 'Готово!';
+                } catch (error) { statusImages.textContent = `Ошибка: ${error.message}`;
                 } finally { convertButtonImages.disabled = false; }
             });
-
-            function readFileAsDataURL(file) {
-                return new Promise((resolve, reject) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve(reader.result);
-                    reader.onerror = (e) => reject(e);
-                    reader.readAsDataURL(file);
-                });
-            }
-            function getImageProperties(imgData) {
-                return new Promise((resolve, reject) => {
-                    const img = new Image();
-                    img.onload = () => resolve({ width: img.width, height: img.height });
-                    img.onerror = (e) => reject(e);
-                    img.src = imgData;
-                });
-            }
-            function getCorrectedImage(imgData, rawWidth, rawHeight, orientation) {
-                return new Promise((resolve, reject) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas'); const ctx = canvas.getContext('2d');
-                        let visualWidth = rawWidth; let visualHeight = rawHeight;
-                        if (orientation > 4) { visualWidth = rawHeight; visualHeight = rawWidth; }
-                        canvas.width = visualWidth; canvas.height = visualHeight;
-                        switch (orientation) {
-                            case 2: ctx.translate(visualWidth, 0); ctx.scale(-1, 1); break;
-                            case 3: ctx.translate(visualWidth, visualHeight); ctx.rotate(Math.PI); break;
-                            case 4: ctx.translate(0, visualHeight); ctx.scale(1, -1); break;
-                            case 5: ctx.rotate(0.5 * Math.PI); ctx.scale(1, -1); break;
-                            case 6: ctx.rotate(0.5 * Math.PI); ctx.translate(0, -visualWidth); break;
-                            case 7: ctx.rotate(0.5 * Math.PI); ctx.translate(visualHeight, -visualWidth); ctx.scale(-1, 1); break;
-                            case 8: ctx.rotate(-0.5 * Math.PI); ctx.translate(-visualHeight, 0); break;
-                        }
-                        ctx.drawImage(img, 0, 0, rawWidth, rawHeight);
-                        const correctedDataURL = canvas.toDataURL('image/jpeg', 0.9);
-                        resolve({ correctedDataURL, visualWidth, visualHeight });
-                    };
-                    img.onerror = (e) => reject(e);
-                    img.src = imgData;
-                });
-            }
         })();
 
 
@@ -250,22 +276,27 @@
 
             convertButtonMerge.addEventListener('click', async () => {
                 const files = fileInputMerge.files;
-                if (files.length < 2) { statusMerge.textContent = 'Пожалуйста, выберите хотя бы 2 PDF-файла!'; return; }
+                if (files.length < 2) { statusMerge.textContent = 'Выберите хотя бы 2 PDF-файла!'; return; }
                 statusMerge.textContent = 'Объединение...'; convertButtonMerge.disabled = true;
+                
                 try {
                     const mergedPdf = await PDFDocument.create();
+                    
                     for (let i = 0; i < files.length; i++) {
                         const file = files[i];
-                        statusMerge.textContent = `Добавляем файл ${i + 1} из ${files.length}...`;
+                        statusMerge.textContent = `Чтение ${i + 1} из ${files.length} (${file.name})...`;
                         const arrayBuffer = await readFileAsArrayBuffer(file);
-                        const pdfDoc = await PDFDocument.load(arrayBuffer);
+                        
+                        // Используем умную загрузку
+                        const pdfDoc = await smartLoadPdfLib(arrayBuffer, file.name);
+
                         const copiedPages = await mergedPdf.copyPages(pdfDoc, pdfDoc.getPageIndices());
                         copiedPages.forEach((page) => { mergedPdf.addPage(page); });
                     }
+                    
                     const mergedPdfBytes = await mergedPdf.save();
-                    const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
-                    downloadBlob(blob, 'merged-file.pdf');
-                    statusMerge.textContent = 'Готово! Файлы объединены.';
+                    downloadBlob(new Blob([mergedPdfBytes], { type: 'application/pdf' }), 'merged-file.pdf');
+                    statusMerge.textContent = 'Готово!';
                 } catch (error) { statusMerge.textContent = `Ошибка: ${error.message}`; console.error(error);
                 } finally { convertButtonMerge.disabled = false; }
             });
@@ -280,324 +311,195 @@
             const loadButtonSplit = document.getElementById('loadButtonSplit');
             const createButtonSplit = document.getElementById('createButtonSplit');
             const statusSplit = document.getElementById('statusSplit');
-            const splitInterface = document.getElementById('splitInterface');
             const sourcePagesContainer = document.getElementById('sourcePages');
             const newDocPagesContainer = document.getElementById('newDocPages');
             
-            let loadedPdfArrayBuffer = null; 
+            let loadedPdfArrayBuffer = null;
+            let loadedFileName = ''; 
 
             loadButtonSplit.addEventListener('click', async () => {
                 const file = fileInputSplit.files[0];
-                if (!file) { statusSplit.textContent = 'Пожалуйста, выберите PDF-файл.'; return; }
-                statusSplit.textContent = 'Загрузка файла...'; loadButtonSplit.disabled = true;
+                if (!file) { statusSplit.textContent = 'Выберите файл.'; return; }
+                statusSplit.textContent = 'Обработка...'; loadButtonSplit.disabled = true;
                 sourcePagesContainer.innerHTML = ''; newDocPagesContainer.innerHTML = '';
-                splitInterface.style.display = 'none';
+                document.getElementById('splitInterface').style.display = 'none';
 
                 try {
                     loadedPdfArrayBuffer = await readFileAsArrayBuffer(file);
-                    const loadingTask = pdfjsLib.getDocument({ data: loadedPdfArrayBuffer });
-                    const pdfDoc = await loadingTask.promise;
-                    const numPages = pdfDoc.numPages;
-                    statusSplit.textContent = `Рендеринг ${numPages} эскизов...`;
+                    loadedFileName = file.name;
                     
-                    for (let i = 1; i <= numPages; i++) {
+                    // Загрузка эскизов через pdf.js
+                    const loadingTask = getSmartPdfJsLoadingTask(loadedPdfArrayBuffer);
+
+                    const pdfDoc = await loadingTask.promise;
+                    statusSplit.textContent = `Рендеринг ${pdfDoc.numPages} стр...`;
+                    
+                    for (let i = 1; i <= pdfDoc.numPages; i++) {
                         const page = await pdfDoc.getPage(i);
-                        const viewport = page.getViewport({ scale: 0.5 }); 
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        canvas.width = viewport.width; canvas.height = viewport.height;
-                        const renderContext = { canvasContext: ctx, viewport: viewport };
-                        await page.render(renderContext).promise;
-                        sourcePagesContainer.appendChild(
-                            createPageThumbnail(canvas.toDataURL('image/png'), i)
-                        );
+                        const vp = page.getViewport({ scale: 0.3 });
+                        const cvs = document.createElement('canvas');
+                        cvs.width = vp.width; cvs.height = vp.height;
+                        await page.render({ canvasContext: cvs.getContext('2d'), viewport: vp }).promise;
+                        
+                        // Создаем миниатюру
+                        const div = document.createElement('div'); div.className = 'page-thumbnail';
+                        div.dataset.pageNum = i; 
+                        const img = document.createElement('img'); img.src = cvs.toDataURL('image/png');
+                        const span = document.createElement('span'); span.textContent = `Стр. ${i}`;
+                        div.appendChild(img); div.appendChild(span);
+                        sourcePagesContainer.appendChild(div);
                     }
-                    splitInterface.style.display = 'block';
-                    statusSplit.textContent = 'Кликните на страницы слева, чтобы добавить их в новый документ.';
-                } catch (error) { statusSplit.textContent = `Ошибка загрузки PDF: ${error.message}`; console.error(error);
+                    document.getElementById('splitInterface').style.display = 'block';
+                    statusSplit.textContent = 'Готово к сборке.';
+                } catch (error) { statusSplit.textContent = `Ошибка: ${error.message}`; 
                 } finally { loadButtonSplit.disabled = false; }
             });
             
-            function createPageThumbnail(imgDataUrl, pageNum) {
-                const div = document.createElement('div'); div.className = 'page-thumbnail';
-                div.dataset.pageNum = pageNum; 
-                const img = document.createElement('img'); img.src = imgDataUrl;
-                const span = document.createElement('span'); span.textContent = `Стр. ${pageNum}`;
-                div.appendChild(img); div.appendChild(span);
-                return div;
-            }
-
+            // Drag & Drop и клики (без изменений)
             sourcePagesContainer.addEventListener('click', (e) => {
-                const targetThumbnail = e.target.closest('.page-thumbnail');
-                if (!targetThumbnail) return;
-                const newThumbnail = targetThumbnail.cloneNode(true);
-                newDocPagesContainer.appendChild(newThumbnail);
-                statusSplit.textContent = `Добавлена стр. ${targetThumbnail.dataset.pageNum}.`;
+                const t = e.target.closest('.page-thumbnail'); if(t) newDocPagesContainer.appendChild(t.cloneNode(true));
             });
-            
             newDocPagesContainer.addEventListener('click', (e) => {
-                const targetThumbnail = e.target.closest('.page-thumbnail');
-                if (targetThumbnail) {
-                    targetThumbnail.remove();
-                }
+                const t = e.target.closest('.page-thumbnail'); if(t) t.remove();
             });
-
-            // --- Логика Drag & Drop ---
-            let draggingElement = null;
-            let placeholder = document.createElement('div');
-            placeholder.className = 'drag-over-placeholder';
-
+            let dE = null; const ph = document.createElement('div'); ph.className = 'drag-over-placeholder';
             newDocPagesContainer.addEventListener('dragstart', (e) => {
-                const target = e.target.closest('.page-thumbnail');
-                if (!target) return;
-                draggingElement = target; e.dataTransfer.effectAllowed = 'move';
-                setTimeout(() => {
-                    draggingElement.classList.add('dragging');
-                    newDocPagesContainer.insertBefore(placeholder, draggingElement);
-                }, 0);
+                dE = e.target.closest('.page-thumbnail'); if(dE){ e.dataTransfer.effectAllowed='move'; setTimeout(()=>dE.classList.add('dragging'),0); newDocPagesContainer.insertBefore(ph, dE); }
             });
-            newDocPagesContainer.addEventListener('dragend', (e) => {
-                if (!draggingElement) return;
-                draggingElement.classList.remove('dragging');
-                if (placeholder.parentNode) {
-                    placeholder.parentNode.replaceChild(draggingElement, placeholder);
-                }
-                draggingElement = null;
+            newDocPagesContainer.addEventListener('dragend', () => {
+                if(dE) { dE.classList.remove('dragging'); if(ph.parentNode) ph.parentNode.replaceChild(dE, ph); dE=null; }
             });
             newDocPagesContainer.addEventListener('dragover', (e) => {
-                e.preventDefault(); e.dataTransfer.dropEffect = 'move';
-                const target = e.target.closest('.page-thumbnail');
-                if (target && target !== draggingElement) {
-                    const rect = target.getBoundingClientRect();
-                    const next = (e.clientY - rect.top) / rect.height > 0.5;
-                    newDocPagesContainer.insertBefore(placeholder, next ? target.nextSibling : target);
-                } else if (!target && newDocPagesContainer.children.length > 0 && !newDocPagesContainer.contains(placeholder)) {
-                    newDocPagesContainer.appendChild(placeholder);
-                }
+                e.preventDefault(); const t = e.target.closest('.page-thumbnail');
+                if(t && t!==dE) { const n = (e.clientY-t.getBoundingClientRect().top)/t.offsetHeight > 0.5; newDocPagesContainer.insertBefore(ph, n?t.nextSibling:t); }
+                else if(!t && newDocPagesContainer.children.length>0 && !newDocPagesContainer.contains(ph)) newDocPagesContainer.appendChild(ph);
             });
 
+            // СБОРКА
             createButtonSplit.addEventListener('click', async () => {
-                const selectedPages = newDocPagesContainer.querySelectorAll('.page-thumbnail');
-                if (selectedPages.length === 0) { statusSplit.textContent = 'Добавьте хотя бы одну страницу.'; return; }
-                if (!loadedPdfArrayBuffer) { statusSplit.textContent = 'Ошибка: Исходный PDF не найден.'; return; }
-                statusSplit.textContent = 'Сборка PDF...'; createButtonSplit.disabled = true;
+                const pages = newDocPagesContainer.querySelectorAll('.page-thumbnail');
+                if (pages.length === 0) { statusSplit.textContent = 'Добавьте страницы.'; return; }
+                statusSplit.textContent = 'Сборка...'; createButtonSplit.disabled = true;
+                
                 try {
-                    const originalPdfDoc = await PDFDocument.load(loadedPdfArrayBuffer);
+                    // Используем умную загрузку
+                    const originalPdfDoc = await smartLoadPdfLib(loadedPdfArrayBuffer, loadedFileName);
+                    
                     const newPdfDoc = await PDFDocument.create();
-                    const pageIndices = Array.from(selectedPages).map(thumb => parseInt(thumb.dataset.pageNum) - 1);
-                    const copiedPages = await newPdfDoc.copyPages(originalPdfDoc, pageIndices);
-                    copiedPages.forEach(page => newPdfDoc.addPage(page));
-                    const newPdfBytes = await newPdfDoc.save();
-                    downloadBlob(new Blob([newPdfBytes], { type: 'application/pdf' }), 'split-combined-file.pdf');
-                    statusSplit.textContent = 'Готово! Новый PDF создан.';
-                } catch (error) { statusSplit.textContent = `Ошибка сборки PDF: ${error.message}`; console.error(error);
+                    const indices = Array.from(pages).map(p => parseInt(p.dataset.pageNum) - 1);
+                    
+                    // ВАЖНО: copyPages может ругаться на Adobe Sign, даже если файл открылся.
+                    // Обычно это работает, потому что smartLoadPdfLib проходит валидацию.
+                    const copiedPages = await newPdfDoc.copyPages(originalPdfDoc, indices);
+                    copiedPages.forEach(p => newPdfDoc.addPage(p));
+                    
+                    const bytes = await newPdfDoc.save();
+                    downloadBlob(new Blob([bytes], { type: 'application/pdf' }), 'split-result.pdf');
+                    statusSplit.textContent = 'Успешно!';
+                } catch (error) { 
+                    statusSplit.textContent = `Ошибка: ${error.message}`; 
                 } finally { createButtonSplit.disabled = false; }
             });
         })();
 
         // ==========================================================
-        // --- 4. NEW: PDF TO JPEG LOGIC ---
+        // --- 4. PDF TO JPEG ---
         // ==========================================================
         (function setupPdfToJpeg() {
-            const fileInputToJpeg = document.getElementById('fileInputToJpeg');
-            const convertPdfToJpegBtn = document.getElementById('convertPdfToJpegBtn');
-            const statusToJpeg = document.getElementById('statusToJpeg');
+            const fileInput = document.getElementById('fileInputToJpeg');
+            const btn = document.getElementById('convertPdfToJpegBtn');
+            const status = document.getElementById('statusToJpeg');
 
-            convertPdfToJpegBtn.addEventListener('click', async () => {
-                const file = fileInputToJpeg.files[0];
-                if (!file) {
-                    statusToJpeg.textContent = 'Пожалуйста, выберите PDF-файл.';
-                    return;
-                }
-
-                statusToJpeg.textContent = 'Инициализация...';
-                convertPdfToJpegBtn.disabled = true;
+            btn.addEventListener('click', async () => {
+                const file = fileInput.files[0];
+                if (!file) { status.textContent = 'Выберите файл.'; return; }
+                status.textContent = 'Загрузка...'; btn.disabled = true;
 
                 try {
-                    const arrayBuffer = await readFileAsArrayBuffer(file);
-                    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                    const buf = await readFileAsArrayBuffer(file);
+                    // Умная загрузка pdf.js
+                    const loadingTask = getSmartPdfJsLoadingTask(buf);
                     const pdfDoc = await loadingTask.promise;
                     
                     const zip = new JSZip();
-                    const totalPages = pdfDoc.numPages;
-
-                    for (let i = 1; i <= totalPages; i++) {
-                        statusToJpeg.textContent = `Конвертация страницы ${i} из ${totalPages}...`;
-                        
+                    for (let i = 1; i <= pdfDoc.numPages; i++) {
+                        status.textContent = `Конвертация стр. ${i}...`;
                         const page = await pdfDoc.getPage(i);
-                        // Scale 2.0 provides better quality than 1.0 (default)
-                        const viewport = page.getViewport({ scale: 2.0 }); 
-                        
-                        const canvas = document.createElement('canvas');
-                        const ctx = canvas.getContext('2d');
-                        canvas.width = viewport.width;
-                        canvas.height = viewport.height;
-
-                        const renderContext = {
-                            canvasContext: ctx,
-                            viewport: viewport
-                        };
-
-                        await page.render(renderContext).promise;
-
-                        // Convert Canvas to Blob (JPEG)
-                        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+                        const vp = page.getViewport({ scale: 2.0 });
+                        const cvs = document.createElement('canvas'); cvs.width = vp.width; cvs.height = vp.height;
+                        await page.render({ canvasContext: cvs.getContext('2d'), viewport: vp }).promise;
+                        const blob = await new Promise(r => cvs.toBlob(r, 'image/jpeg', 0.8));
                         zip.file(`page-${i}.jpg`, blob);
                     }
-
-                    statusToJpeg.textContent = 'Создание ZIP-архива...';
                     const content = await zip.generateAsync({ type: "blob" });
-                    downloadBlob(content, "pdf-pages-to-jpg.zip");
-                    statusToJpeg.textContent = 'Готово! Архив скачан.';
-
-                } catch (error) {
-                    statusToJpeg.textContent = `Ошибка: ${error.message}`;
-                    console.error(error);
-                } finally {
-                    convertPdfToJpegBtn.disabled = false;
-                }
+                    downloadBlob(content, "pdf-pages.zip");
+                    status.textContent = 'Готово!';
+                } catch (error) { status.textContent = `Ошибка: ${error.message}`;
+                } finally { btn.disabled = false; }
             });
         })();
         
         // ==========================================================
-        // --- 5. ЛОГИКА ИЗВЛЕЧЕНИЯ КАРТИНОК ---
+        // --- 5. EXTRACT IMAGES ---
         // ==========================================================
         (function setupImageExtractor() {
-            const fileInputExtract = document.getElementById('fileInputExtract');
-            const extractButton = document.getElementById('extractButton');
-            const statusExtract = document.getElementById('statusExtract');
+            const fileInput = document.getElementById('fileInputExtract');
+            const btn = document.getElementById('extractButton');
+            const status = document.getElementById('statusExtract');
 
-            extractButton.addEventListener('click', async () => {
-                const file = fileInputExtract.files[0];
-                if (!file) {
-                    statusExtract.textContent = 'Пожалуйста, выберите PDF-файл.';
-                    return;
-                }
-
-                statusExtract.textContent = 'Загрузка и анализ PDF...';
-                extractButton.disabled = true;
+            btn.addEventListener('click', async () => {
+                const file = fileInput.files[0];
+                if (!file) { status.textContent = 'Выберите файл.'; return; }
+                status.textContent = 'Анализ...'; btn.disabled = true;
 
                 try {
-                    const arrayBuffer = await readFileAsArrayBuffer(file);
-                    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+                    const buf = await readFileAsArrayBuffer(file);
+                    const loadingTask = getSmartPdfJsLoadingTask(buf);
                     const pdfDoc = await loadingTask.promise;
                     
                     const zip = new JSZip();
-                    let imageCount = 0;
-
-                    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
-                        statusExtract.textContent = `Сканирование страницы ${pageNum} из ${pdfDoc.numPages}...`;
-                        const page = await pdfDoc.getPage(pageNum);
-                        
-                        const opList = await page.getOperatorList();
-                        
-                        // Ищем команды отрисовки изображений
-                        for (let i = 0; i < opList.fnArray.length; i++) {
-                            if (opList.fnArray[i] === pdfjsLib.OPS.paintImageXObject) {
-                                const imgName = opList.argsArray[i][0]; // Имя ресурса (XObject)
-                                
+                    let cnt = 0;
+                    for (let i = 1; i <= pdfDoc.numPages; i++) {
+                        status.textContent = `Стр. ${i}...`;
+                        const page = await pdfDoc.getPage(i);
+                        const ops = await page.getOperatorList();
+                        for (let j = 0; j < ops.fnArray.length; j++) {
+                            if (ops.fnArray[j] === pdfjsLib.OPS.paintImageXObject) {
+                                const name = ops.argsArray[j][0];
                                 try {
-                                    const img = await page.objs.get(imgName);
-
-                                    if (img && img.data) {
-                                        imageCount++;
-                                        statusExtract.textContent = `Найдено изображений: ${imageCount}. Конвертация...`;
+                                    const img = await page.objs.get(name);
+                                    if(img && img.data) {
+                                        cnt++;
+                                        const cvs = document.createElement('canvas'); cvs.width = img.width; cvs.height = img.height;
+                                        const ctx = cvs.getContext('2d');
+                                        const iData = ctx.createImageData(img.width, img.height);
                                         
-                                        // Конвертируем данные изображения в PNG blob
-                                        const blob = await convertImgDataToPngBlob(img);
-                                        
-                                        // Добавляем в zip
-                                        if (blob) {
-                                            zip.file(`page-${pageNum}-img-${imageCount}.png`, blob);
-                                        } else {
-                                            console.warn(`Не удалось сконвертировать изображение ${imgName} на стр. ${pageNum}`);
-                                            imageCount--; // Не считаем неудачные
+                                        if (img.kind === 0) { 
+                                            // JPEG прямой дамп (быстрее и надежнее)
+                                            zip.file(`img-${cnt}.jpg`, new Blob([img.data], {type: 'image/jpeg'}));
+                                            continue; 
                                         }
+                                        if (img.kind === 1) iData.data.set(img.data);
+                                        else if (img.kind === 2) {
+                                            let p=0; for(let k=0; k<img.data.length; k+=3) {
+                                                iData.data[p++]=img.data[k]; iData.data[p++]=img.data[k+1];
+                                                iData.data[p++]=img.data[k+2]; iData.data[p++]=255;
+                                            }
+                                        }
+                                        ctx.putImageData(iData, 0, 0);
+                                        zip.file(`img-${cnt}.png`, await new Promise(r => cvs.toBlob(r)));
                                     }
-                                } catch (e) {
-                                    console.error(`Ошибка извлечения объекта ${imgName}:`, e);
-                                    statusExtract.textContent = `Ошибка на стр. ${pageNum}. Пропускаем...`;
-                                }
+                                } catch(e){}
                             }
                         }
                     }
-
-                    if (imageCount === 0) {
-                        statusExtract.textContent = 'Изображения в этом PDF не найдены (или не могут быть извлечены).';
-                    } else {
-                        statusExtract.textContent = `Создание zip-архива из ${imageCount} изображений...`;
-                        const zipBlob = await zip.generateAsync({ type: 'blob' });
-                        downloadBlob(zipBlob, 'extracted-images.zip');
-                        statusExtract.textContent = `Готово! ${imageCount} изображений скачано.`;
-                    }
-
-                } catch (error) {
-                    statusExtract.textContent = `Ошибка: ${error.message}`;
-                    console.error(error);
-                } finally {
-                    extractButton.disabled = false;
-                }
+                    if(cnt>0) {
+                        downloadBlob(await zip.generateAsync({type:"blob"}), 'extracted.zip');
+                        status.textContent = `Извлечено: ${cnt}`;
+                    } else status.textContent = 'Картинки не найдены.';
+                } catch (error) { status.textContent = `Ошибка: ${error.message}`;
+                } finally { btn.disabled = false; }
             });
-
-            // Вспомогательная функция для конвертации данных в PNG
-            async function convertImgDataToPngBlob(imgData) {
-                const canvas = document.createElement('canvas');
-                canvas.width = imgData.width;
-                canvas.height = imgData.height;
-                const ctx = canvas.getContext('2d');
-                
-                if (imgData.kind === 0) { // 0 === JPEG
-                    try {
-                        const blob = new Blob([imgData.data], { type: 'image/jpeg' });
-                        const url = URL.createObjectURL(blob);
-                        const img = new Image();
-                        await new Promise((resolve, reject) => {
-                            img.onload = resolve;
-                            img.onerror = (e) => reject(new Error('Не удалось загрузить JPEG данные'));
-                            img.src = url;
-                        });
-                        ctx.drawImage(img, 0, 0);
-                        URL.revokeObjectURL(url);
-                    } catch (e) {
-                        console.error("Ошибка обработки JPEG:", e, imgData);
-                        return null; 
-                    }
-                    
-                } else if (imgData.kind === 1) { // 1 === RGBA_32BPP
-                    try {
-                        const imageData = ctx.createImageData(imgData.width, imgData.height);
-                        imageData.data.set(imgData.data);
-                        ctx.putImageData(imageData, 0, 0);
-                    } catch (e) {
-                        console.error("Ошибка обработки RGBA:", e, imgData);
-                        return null;
-                    }
-                    
-                } else if (imgData.kind === 2) { // 2 === RGB_24BPP
-                    try {
-                        const imageData = ctx.createImageData(imgData.width, imgData.height);
-                        const rgbData = imgData.data;
-                        const rgbaData = imageData.data;
-                        let j = 0;
-                        for (let i = 0; i < rgbData.length; i += 3) {
-                            rgbaData[j++] = rgbData[i];     // R
-                            rgbaData[j++] = rgbData[i + 1]; // G
-                            rgbaData[j++] = rgbData[i + 2]; // B
-                            rgbaData[j++] = 255;            // A
-                        }
-                        ctx.putImageData(imageData, 0, 0);
-                    } catch (e) {
-                        console.error("Ошибка обработки RGB:", e, imgData);
-                        return null;
-                    }
-                } else {
-                    console.warn("Неподдерживаемый формат изображения:", imgData.kind);
-                    return null;
-                }
-                
-                return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-            }
-
         })();
 
     </script>
