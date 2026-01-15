@@ -1,78 +1,78 @@
-# PDF-редактор (100% в браузере)
+# PDF Editor (100% Client-Side)
 
-Это простое, но мощное веб-приложение для выполнения самых частых операций с PDF-файлами.
+This is a simple but powerful web application for performing the most common operations with PDF files.
 
-**Ключевая особенность: 100% Конфиденциальность.** Все операции (конвертация, объединение, извлечение) происходят **исключительно в вашем браузере**. Ни один из ваших файлов никогда не загружается на сервер. Вся обработка выполняется на вашем устройстве.
+**Key Feature: 100% Privacy.** All operations (conversion, merging, extraction) happen **exclusively in your browser**. None of your files are ever uploaded to a server. All processing is performed on your device.
 
 ## 🚀 Live Demo
 
-Вы можете попробовать его прямо сейчас по этой ссылке:
+You can try it right now at this link:
 **[https://artem0708.github.io/pdf-converter/](https://artem0708.github.io/pdf-converter/)**
 
 ---
 
-## 🛠️ Возможности
+## 🛠️ Features
 
-Этот инструмент объединяет четыре основные функции в одном удобном интерфейсе:
+This tool combines four main functions in one convenient interface:
 
-1.  **Фото в PDF**
-    * Конвертирует одно или несколько изображений (JPG, PNG, WebP) в единый PDF-документ.
-    * Автоматически исправляет ориентацию фотографий (например, с телефона) благодаря чтению EXIF-данных.
-    * Подбирает правильную ориентацию страницы (портретную или альбомную) для каждого изображения.
+1.  **Image to PDF**
+    * Converts one or more images (JPG, PNG, WebP) into a single PDF document.
+    * Automatically corrects photo orientation (e.g., from phones) by reading EXIF data.
+    * Selects the correct page orientation (portrait or landscape) for each image.
 
-2.  **Объединить PDF**
-    * Позволяет выбрать несколько PDF-файлов.
-    * "Склеивает" их в один итоговый PDF-документ в том порядке, в котором они были выбраны.
+2.  **Merge PDF**
+    * Allows selecting multiple PDF files.
+    * "Glues" them into one final PDF document in the order they were selected.
 
-3.  **Разбить / Собрать PDF**
-    * Загружает PDF-файл и отображает эскизы всех его страниц.
-    * Позволяет "собрать" новый документ, кликая на нужные страницы.
-    * В окне "Ваш новый документ" можно **перетаскивать** (drag-and-drop) страницы, чтобы задать им идеальный порядок.
-    * Клик по странице в новом документе удаляет ее.
+3.  **Split / Assemble PDF**
+    * Loads a PDF file and displays thumbnails of all its pages.
+    * Allows you to "assemble" a new document by clicking on the desired pages.
+    * In the "Your New Document" window, you can **drag and drop** pages to set the perfect order.
+    * Clicking on a page in the new document removes it.
 
-4.  **Извлечь Картинки (в .zip)**
-    * Сканирует весь PDF-документ страница за страницей.
-    * Находит все встроенные изображения (растровые и JPEG).
-    * Конвертирует каждое найденное изображение в формат **PNG**.
-    * Упаковывает все изображения в **один .zip-архив** для удобного скачивания.
-
----
-
-## ⚙️ Технологии
-
-Этот проект — одностраничное приложение (SPA), которое полностью работает на стороне клиента. Он не требует бэкенда.
-
-* **HTML5 / CSS3 / Ванильный JavaScript**
-* **[jsPDF](https://github.com/parallax/jsPDF)**: Для создания PDF-документов из изображений (вкладка "Фото в PDF").
-* **[exifr](https://github.com/mutiny-labs/exifr)**: Для чтения EXIF-данных (ориентации) из JPG-файлов.
-* **[pdf-lib](https://github.com/Hopding/pdf-lib)**: Для "редактирования" PDF: объединения (Merge) и сборки нового документа (Combine).
-* **[pdf.js](https://github.com/mozilla/pdf.js)**: "Движок" от Mozilla для чтения PDF-файлов и рендеринга эскизов страниц (вкладки "Разбить" и "Извлечь").
-* **[JSZip](https://github.com/Stuk/jszip)**: Для создания .zip-архивов в браузере (вкладка "Извлечь Картинки").
+4.  **Extract Images (to .zip)**
+    * Scans the entire PDF document page by page.
+    * Finds all embedded images (raster and JPEG).
+    * Converts every found image to **PNG** format.
+    * Packs all images into a **single .zip archive** for convenient downloading.
 
 ---
 
-## 💻 Как использовать локально
+## ⚙️ Technologies
 
-Для этого проекта не требуется сборка или сложная установка.
+This project is a Single Page Application (SPA) that runs entirely on the client side. It requires no backend.
 
-1.  Клонируйте репозиторий:
+* **HTML5 / CSS3 / Vanilla JavaScript**
+* **[jsPDF](https://github.com/parallax/jsPDF)**: For creating PDF documents from images ("Image to PDF" tab).
+* **[exifr](https://github.com/mutiny-labs/exifr)**: For reading EXIF data (orientation) from JPG files.
+* **[pdf-lib](https://github.com/Hopding/pdf-lib)**: For "editing" PDF: merging and assembling new documents.
+* **[pdf.js](https://github.com/mozilla/pdf.js)**: The engine from Mozilla for reading PDF files and rendering page thumbnails ("Split" and "Extract" tabs).
+* **[JSZip](https://github.com/Stuk/jszip)**: For creating .zip archives in the browser ("Extract Images" tab).
+
+---
+
+## 💻 How to use locally
+
+This project requires no build process or complex installation.
+
+1.  Clone the repository:
     ```bash
     git clone [https://github.com/Artem0708/pdf-converter.git](https://github.com/Artem0708/pdf-converter.git)
     ```
-2.  Перейдите в папку проекта:
+2.  Go to the project folder:
     ```bash
     cd pdf-converter
     ```
-3.  Поскольку `pdf.js` для загрузки своих "воркеров" требует HTTP-сервер (и не будет работать при открытии файла через `file:///`), запустите простой локальный сервер.
+3.  Since `pdf.js` requires an HTTP server to load its "workers" (and will not work if the file is opened via `file:///`), run a simple local server.
 
-    *Если у вас установлен **Python 3**:*
+    *If you have **Python 3** installed:*
     ```bash
     python -m http.server
     ```
-    *Если у вас установлен **Node.js** (и `live-server`):*
+    *If you have **Node.js** (and `live-server`):*
     ```bash
     npm install -g live-server
     live-server
     ```
 
-4.  Откройте в браузере `http://localhost:8000` (для Python) или `http://localhost:8080` (для `live-server`).
+4.  Open `http://localhost:8000` (for Python) or `http://localhost:8080` (for `live-server`) in your browser.
